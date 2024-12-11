@@ -25,9 +25,12 @@ use esp_hal::{
         now, 
         Instant}};
 use esp_println::println;
-use log::{info, log};
 
 static BUTTON: Mutex<RefCell<Option<Input>>> = Mutex::new(RefCell::new(None));
+static DETECT_FLAG: Mutex<RefCell<bool>> = Mutex::new(RefCell::new(false));
+static DETECT_FLAG_T: Mutex<RefCell<Instant>> = Mutex::new(RefCell::new(Instant::from_ticks(1)));
+
+
 
 #[entry]
 fn main() -> ! {
@@ -43,8 +46,10 @@ fn main() -> ! {
     io.set_interrupt_handler(handler);
     
     let button = peripherals.GPIO19;
+    let output_pin = peripherals.GPIO12;
 
     let mut button = Input::new(button, Pull::Up);
+    let mut output_pin = Output::new(output_pin, Level::Low);
 
     critical_section::with(|cs| {
         button.listen(Event::RisingEdge);
@@ -52,12 +57,12 @@ fn main() -> ! {
     });
 
     let analog_pin = peripherals.GPIO39;
-    let mut adc2_config = AdcConfig::new();
-    let mut pin = adc2_config.enable_pin(
+    let mut adc1_config = AdcConfig::new();
+    let mut pin = adc1_config.enable_pin(
         analog_pin,
         Attenuation::Attenuation11dB,
     );
-    let mut adc1 = Adc::new(peripherals.ADC1, adc2_config);
+    let mut adc1 = Adc::new(peripherals.ADC1, adc1_config);
     
     let duration_t = 500; //Milis
     let duration_t = duration_t * 1_000;
@@ -65,6 +70,9 @@ fn main() -> ! {
     let mut time_start = now();
    
     loop {
+        let zero_cross: bool = critical_section::with(|cs| *DETECT_FLAG.borrow_ref(cs));
+        let zero_cross_time = critical_section::with(|cs| *DETECT_FLAG_T.borrow_ref(cs));
+
         let pin_value: u16 = nb::block!(adc1.read_oneshot(&mut pin)).unwrap();
         let pin_value: f32 = ((pin_value as f32) * 100.0)/3750.0;
 
@@ -84,7 +92,25 @@ fn main() -> ! {
 
         let output: f32 = defuzzify(&results);
 
+        let signal_delay = (output as u64) * 8333 / 180;
+        let signal_delay = Instant::from_ticks(signal_delay as u64);
+
         let time_now = now();
+
+        if zero_cross {
+            if time_now.ticks() - zero_cross_time.ticks() >= signal_delay.ticks(){
+                output_pin.set_high();
+            }    
+
+            if time_now.ticks() - zero_cross_time.ticks() >= signal_delay.ticks() + Instant::from_ticks(500).ticks(){    
+                output_pin.set_low();
+                critical_section::with(|cs|{
+                    let mut zero_cross = DETECT_FLAG.borrow_ref_mut(cs);
+                    * zero_cross = false;
+                });
+            }    
+        }
+    
         if time_now.ticks() - time_start.ticks() >= duration_t.ticks(){
             println!("Salida: {}",output);
             time_start = now();
@@ -145,11 +171,6 @@ fn defuzzify(results: &[(f32, f32); 3]) -> f32 {
 #[handler]
 #[ram]
 fn handler() {
-    println!(
-            "GPIO Interrupt with priority {}",
-            esp_hal::xtensa_lx::interrupt::get_level()
-    );
-
     if critical_section::with(|cs| {
         BUTTON
             .borrow_ref_mut(cs)
@@ -157,9 +178,14 @@ fn handler() {
             .unwrap()
             .is_interrupt_set()
     }) {
-        println!("Button was the source of the interrupt");
-    } else {
-        println!("Button was not the source of the interrupt");
+        critical_section::with(|cs|{
+            let mut zero_cross = DETECT_FLAG.borrow_ref_mut(cs);
+            * zero_cross = true;
+        });
+        critical_section::with(|cs|{
+            let mut zero_cross_time = DETECT_FLAG_T.borrow_ref_mut(cs);
+            * zero_cross_time = now();
+        });
     }
 
     critical_section::with(|cs| {
