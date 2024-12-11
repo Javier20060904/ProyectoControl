@@ -7,26 +7,21 @@ use core::cell::RefCell;
 use esp_backtrace as _;
 use critical_section::Mutex;
 use esp_hal::{
-    macros::ram,
-    gpio::{
+    analog::adc::{
+        Adc, 
+        AdcConfig, 
+        Attenuation}, gpio::{
         Event,
         Input,
         Io,
         Level,
         Output,
         Pull,
-    },
-    analog::adc::{
-        Adc, 
-        AdcConfig, 
-        Attenuation}, 
-    prelude::*, 
-    time::{
+    }, prelude::*, time::{
         now, 
-        Instant}};
+        Instant},};
 use esp_println::println;
 
-static BUTTON: Mutex<RefCell<Option<Input>>> = Mutex::new(RefCell::new(None));
 static DETECT_FLAG: Mutex<RefCell<bool>> = Mutex::new(RefCell::new(false));
 static DETECT_FLAG_T: Mutex<RefCell<Instant>> = Mutex::new(RefCell::new(Instant::from_ticks(1)));
 
@@ -42,19 +37,20 @@ fn main() -> ! {
         config
     });
 
-    let mut io = Io::new(peripherals.IO_MUX);
-    io.set_interrupt_handler(handler);
+    //let mut io = Io::new(peripherals.IO_MUX);
+    //io.set_interrupt_handler(handler);
     
     let button = peripherals.GPIO19;
     let output_pin = peripherals.GPIO12;
 
     let mut button = Input::new(button, Pull::Up);
+    let mut button_state: Level = Level::High;
     let mut output_pin = Output::new(output_pin, Level::Low);
 
-    critical_section::with(|cs| {
+   /*critical_section::with(|cs| {
         button.listen(Event::RisingEdge);
         BUTTON.borrow_ref_mut(cs).replace(button)
-    });
+    });*/ 
 
     let analog_pin = peripherals.GPIO39;
     let mut adc1_config = AdcConfig::new();
@@ -97,18 +93,21 @@ fn main() -> ! {
 
         let time_now = now();
 
-        if zero_cross {
-            if time_now.ticks() - zero_cross_time.ticks() >= signal_delay.ticks(){
-                output_pin.set_high();
-            }    
-
-            if time_now.ticks() - zero_cross_time.ticks() >= signal_delay.ticks() + Instant::from_ticks(500).ticks(){    
-                output_pin.set_low();
-                critical_section::with(|cs|{
-                    let mut zero_cross = DETECT_FLAG.borrow_ref_mut(cs);
-                    * zero_cross = false;
-                });
-            }    
+        if button_state != button.level() {
+            if button.is_high(){
+                if time_now.ticks() - zero_cross_time.ticks() >= signal_delay.ticks(){
+                    output_pin.set_high();
+                }    
+    
+                if time_now.ticks() - zero_cross_time.ticks() >= signal_delay.ticks() + Instant::from_ticks(500).ticks(){    
+                    output_pin.set_low();
+                    critical_section::with(|cs|{
+                        let mut zero_cross = DETECT_FLAG.borrow_ref_mut(cs);
+                        * zero_cross = false;
+                    });
+                }
+            }
+            button_state = button.level();
         }
     
         if time_now.ticks() - time_start.ticks() >= duration_t.ticks(){
@@ -168,25 +167,19 @@ fn defuzzify(results: &[(f32, f32); 3]) -> f32 {
     }
 }
 
+/*
 #[handler]
 #[ram]
 fn handler() {
-    if critical_section::with(|cs| {
-        BUTTON
-            .borrow_ref_mut(cs)
-            .as_mut()
-            .unwrap()
-            .is_interrupt_set()
-    }) {
-        critical_section::with(|cs|{
-            let mut zero_cross = DETECT_FLAG.borrow_ref_mut(cs);
-            * zero_cross = true;
-        });
-        critical_section::with(|cs|{
-            let mut zero_cross_time = DETECT_FLAG_T.borrow_ref_mut(cs);
-            * zero_cross_time = now();
-        });
-    }
+    println!("Handler");
+    critical_section::with(|cs|{
+        let mut zero_cross = DETECT_FLAG.borrow_ref_mut(cs);
+        * zero_cross = true;
+    });
+    critical_section::with(|cs|{
+        let mut zero_cross_time = DETECT_FLAG_T.borrow_ref_mut(cs);
+        * zero_cross_time = now();
+    });
 
     critical_section::with(|cs| {
         BUTTON
@@ -195,4 +188,4 @@ fn handler() {
             .unwrap()
             .clear_interrupt()
     });
-}
+}*/
